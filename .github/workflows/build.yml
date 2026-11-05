@@ -1,0 +1,46 @@
+name: Build App
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "zsignapp/**"
+      - "ZSShareExtension/**"
+      - "Zsign/**"
+      - "AltSourceKit/**"
+      - "zsignapp.xcodeproj/**"
+      - "Makefile"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The Liquid Glass UI (glassEffect) needs the iOS 26 SDK, so use the
+      # newest Xcode on the image instead of pinning an older version.
+      - name: Select newest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Compile zsignapp
+        run: |
+          make
+          ls -lh packages/
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zsignapp-ipa
+          path: packages/*.ipa
+          if-no-files-found: error
+          retention-days: 30
