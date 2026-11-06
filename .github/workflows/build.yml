@@ -14,7 +14,7 @@ on:
       - ".github/workflows/build.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -44,3 +44,23 @@ jobs:
           path: packages/*.ipa
           if-no-files-found: error
           retention-days: 30
+
+      - name: Read app version
+        id: version
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Payload/*.app/Info.plist)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # One published release per successful build; the run number keeps
+      # tags unique when the marketing version is unchanged.
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}-${{ github.run_number }}
+          name: zsignapp v${{ steps.version.outputs.version }} (build ${{ github.run_number }})
+          files: packages/*.ipa
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
