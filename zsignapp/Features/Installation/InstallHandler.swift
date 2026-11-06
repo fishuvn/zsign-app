@@ -10,6 +10,7 @@ import NIO
 import NIOCore
 import NIOPosix
 import NIOHTTP1
+import NIOSSL
 
 // MARK: - Điều phối cài đặt
 
@@ -39,7 +40,7 @@ final class InstallHandler {
         try server.start()
         InstallServerPool.shared.keep(server, timeout: serverTimeout)
 
-        let manifestURL = buildManifestURL()
+        let manifestURL = buildManifestURL(server: server)
         let opened = await openURL(buildITunesLink(manifestURL: manifestURL))
         guard opened else {
             InstallServerPool.shared.release(server)
@@ -49,21 +50,36 @@ final class InstallHandler {
         InstalledRegistry.record(bundleId: signedApp.identifier, version: signedApp.version)
     }
 
-    private func buildManifestURL() -> URL {
+    private func buildManifestURL(server: InstallServer) -> URL {
         let host = PlistServerConfig.host
         var comps = URLComponents()
         comps.scheme = "https"
         comps.host = host
         comps.path = "/plist"
-        comps.queryItems = [
-            URLQueryItem(name: "bundleid",   value: signedApp.identifier ?? ""),
-            URLQueryItem(name: "name",       value: signedApp.name ?? ""),
-            URLQueryItem(name: "version",    value: signedApp.version ?? ""),
-            URLQueryItem(name: "fetchurl",   value: "http://127.0.0.1:\(port)/app.ipa"),
-            URLQueryItem(name: "smallimage", value: "http://127.0.0.1:\(port)/app57x57.png"),
-            URLQueryItem(name: "largeimage", value: "http://127.0.0.1:\(port)/app512x512.png"),
-            URLQueryItem(name: "t",          value: String(Int(Date().timeIntervalSince1970)))
-        ]
+        // iOS 27 and later block plain-HTTP install payloads, so advertise the
+        // TLS host when a certificate is bundled; fall back to loopback HTTP
+        // for older iOS otherwise.
+        if let pack = server.tlsPack {
+            comps.queryItems = [
+                URLQueryItem(name: "bundleid",   value: signedApp.identifier ?? ""),
+                URLQueryItem(name: "name",       value: signedApp.name ?? ""),
+                URLQueryItem(name: "version",    value: signedApp.version ?? ""),
+                URLQueryItem(name: "fetchurl",   value: "https://\(pack.host):\(port)/app.ipa"),
+                URLQueryItem(name: "smallimage", value: "https://\(pack.host):\(port)/app57x57.png"),
+                URLQueryItem(name: "largeimage", value: "https://\(pack.host):\(port)/app512x512.png"),
+                URLQueryItem(name: "t",          value: String(Int(Date().timeIntervalSince1970)))
+            ]
+        } else {
+            comps.queryItems = [
+                URLQueryItem(name: "bundleid",   value: signedApp.identifier ?? ""),
+                URLQueryItem(name: "name",       value: signedApp.name ?? ""),
+                URLQueryItem(name: "version",    value: signedApp.version ?? ""),
+                URLQueryItem(name: "fetchurl",   value: "http://127.0.0.1:\(port)/app.ipa"),
+                URLQueryItem(name: "smallimage", value: "http://127.0.0.1:\(port)/app57x57.png"),
+                URLQueryItem(name: "largeimage", value: "http://127.0.0.1:\(port)/app512x512.png"),
+                URLQueryItem(name: "t",          value: String(Int(Date().timeIntervalSince1970)))
+            ]
+        }
         return comps.url ?? URL(string: "https://\(PlistServerConfig.defaultHost)/error")!
     }
 
@@ -148,6 +164,10 @@ private final class InstallServer {
     private let threadPool: NIOThreadPool
     private let fileIO: NonBlockingFileIO
 
+    /// Set in start() when the bundled certificate loads; drives the https://
+    /// payload URLs in the manifest.
+    private(set) var tlsPack: InstallTLSCert.Pack?
+
     private var ipaRequested = false
     private var iconsRequested = 0
 
@@ -165,6 +185,9 @@ private final class InstallServer {
     }
 
     func start() throws {
+        let tlsPack = InstallTLSCert.load()
+        self.tlsPack = tlsPack
+
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 256)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -172,7 +195,13 @@ private final class InstallServer {
                 guard let self = self else {
                     return channel.eventLoop.makeSucceededFuture(())
                 }
-                return channel.pipeline.configureHTTPServerPipeline().flatMap {
+                // TLS sits outermost, in front of the HTTP pipeline.
+                let tlsReady: EventLoopFuture<Void> = tlsPack.map { pack in
+                    channel.pipeline.addHandler(NIOSSLServerHandler(context: pack.context))
+                } ?? channel.eventLoop.makeSucceededFuture(())
+                return tlsReady.flatMap {
+                    channel.pipeline.configureHTTPServerPipeline()
+                }.flatMap {
                     channel.pipeline.addHandler(
                         HTTPHandler(
                             fileIO: self.fileIO,

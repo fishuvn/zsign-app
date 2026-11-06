@@ -33,3 +33,6 @@ Pods/
 .DS_Store
 # Symlink stage tam thoi khi ky, khong thuoc ma nguon
 Payload
+
+# Install-server TLS pack (fetched by `make deps`)
+zsignapp/Certs/

@@ -5,8 +5,9 @@ TMP := $(TMPDIR)/$(NAME)
 STAGE := $(TMP)/stage
 APP := $(TMP)/Build/Products/Release-$(PLATFORM)
 PROJECT_DIR := $(shell pwd)
+CERT_JSON_URL := https://ryuksign-install.ryuksign.workers.dev/pack.json
 
-.PHONY: all clean $(SCHEMES) resolve-packages
+.PHONY: all clean deps $(SCHEMES) resolve-packages
 
 all: $(SCHEMES)
 
@@ -24,8 +25,23 @@ resolve-packages:
 		-project zsignapp.xcodeproj
 	@echo "✅ Packages resolved"
 
+# ⭐ Fetch the install-server TLS pack. iOS 27+ refuses plain-HTTP install
+# payloads, so the local server terminates TLS with this public-CA cert
+# (*.backloop.dev resolves to 127.0.0.1). Files land inside the zsignapp
+# folder, which the synchronized project auto-bundles as resources.
+deps:
+	@mkdir -p zsignapp/Certs
+	@if curl -fsSL "$(CERT_JSON_URL)" -o /tmp/zsignapp-cert.json; then \
+	    jq -r '.cert, .ca' /tmp/zsignapp-cert.json > zsignapp/Certs/server.crt; \
+	    jq -rj '.key1, .key2' /tmp/zsignapp-cert.json > zsignapp/Certs/server.pem; \
+	    jq -r '.info.domains.commonName' /tmp/zsignapp-cert.json > zsignapp/Certs/commonName.txt; \
+	    echo "✅ TLS pack fetched (server.crt, server.pem, commonName.txt)"; \
+	else \
+	    echo "warning: $(CERT_JSON_URL) unavailable, building without the install TLS pack (installs stay plain HTTP and will not work on iOS 27+)"; \
+	fi
+
 # ⭐ UPDATED: Add resolve-packages as dependency
-$(SCHEMES): resolve-packages
+$(SCHEMES): deps resolve-packages
 	@echo "🔨 Building $@..."
 	xcodebuild \
 		-project zsignapp.xcodeproj \
